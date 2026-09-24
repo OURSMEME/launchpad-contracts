@@ -38,7 +38,7 @@ contract OursV4Adapter is Ownable2Step, ReentrancyGuard, IOursSwapAdapter {
     /// @dev route = abi.encode(PoolKey, uint160 sqrtPriceLimitX96). Hook data is empty.
     function execute(address project, address assetIn, address assetOut, uint256 amount, uint256 minOut, bytes calldata route)
         external payable nonReentrant returns (T.ExecutionResult memory result) {
-        if (msg.sender != registry.feePool() && msg.sender != registry.buybackPool() && msg.sender != registry.dividendPool()) revert Invalid();
+        if (!registry.canSwap(project, msg.sender)) revert Invalid();
         (IV4Manager.PoolKey memory key, uint160 limit) = abi.decode(route,(IV4Manager.PoolKey,uint160));
         if (key.currency0 >= key.currency1 || key.tickSpacing <= 0 || limit == 0 || amount == 0 || minOut == 0
             || amount > uint256(uint128(type(int128).max))
@@ -47,7 +47,7 @@ contract OursV4Adapter is Ownable2Step, ReentrancyGuard, IOursSwapAdapter {
         if (assetIn == project || assetOut == project) {
             (bytes32 canonical, address hook) = registry.poolOf(project);
             if (id != canonical || key.hooks != hook || canonical == 0) revert Invalid();
-        } else if (!allowedRewardPools[id] || msg.sender != registry.dividendPool()) revert Invalid();
+        } else if (!allowedRewardPools[id] || !registry.canExecuteStrategy(project, msg.sender)) revert Invalid();
         uint256 beforeIn = _balance(assetIn) - (assetIn == address(0) ? msg.value : 0);
         uint256 beforeOut = _balance(assetOut);
         if (assetIn == address(0)) { if (msg.value != amount) revert Invalid(); }

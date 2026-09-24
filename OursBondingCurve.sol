@@ -277,7 +277,15 @@ contract OursBondingCurve is OursFeeAccrual {
         if (readyToGraduate()) {
             try IOursLaunchFactoryGraduation(factory).graduate(token) {}
             catch {
-                emit AutoGraduationFailed(token, gasleft());
+                uint256 gasRemaining = gasleft();
+                emit AutoGraduationFailed(token, gasRemaining);
+                // Preserve the legacy event and successful buy even if the
+                // optional factory notification reverts or consumes its gas.
+                // With little gas left, only the legacy event is guaranteed.
+                if (gasleft() > 60_000) {
+                    try IOursLaunchFactoryGraduation(factory).reportAutoGraduationFailed{gas: 30_000}(token, gasRemaining) {}
+                    catch {}
+                }
             }
         }
     }

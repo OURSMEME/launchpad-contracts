@@ -9,4 +9,5 @@ pragma solidity ^0.8.26;
  */
 interface IOursLaunchFactoryGraduation {
     function graduate(address token) external;
+    function reportAutoGraduationFailed(address token, uint256 gasRemaining) external;
 }

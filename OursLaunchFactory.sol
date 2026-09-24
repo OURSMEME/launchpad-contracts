@@ -103,7 +103,7 @@ contract OursLaunchFactory is Ownable2Step, ReentrancyGuard, IOursLaunchFactory 
     OursProjectRegistry public revenueRegistry;
     event RevenueRegistrySet(address indexed registry);
     function setRevenueRegistry(OursProjectRegistry registry) external onlyOwner {
-        if(address(revenueRegistry)!=address(0)||registry.launchFactory()!=address(this)||registry.feePool()==address(0)||address(memeHook.revenueRegistry())!=address(registry))revert LaunchDependenciesNotWired();
+        if(address(revenueRegistry)!=address(0)||registry.launchFactory()!=address(this)||registry.feePool()==address(0)||address(registry.strategyRegistry())==address(0)||address(memeHook.revenueRegistry())!=address(registry))revert LaunchDependenciesNotWired();
         revenueRegistry=registry;emit RevenueRegistrySet(address(registry));
     }
 
@@ -189,6 +189,7 @@ contract OursLaunchFactory is Ownable2Step, ReentrancyGuard, IOursLaunchFactory 
     error OwnershipCannotBeRenounced();
     error InvalidTokenParams();
     error TokenNotFound();
+    error NotLaunchCurve();
     error WrongGraduationPhase();
     error GraduationStillViable();
     error NothingToGraduate();
@@ -226,6 +227,7 @@ contract OursLaunchFactory is Ownable2Step, ReentrancyGuard, IOursLaunchFactory 
         uint256 graduationThreshold
     );
     event LaunchSwept(address indexed token, uint256 quoteOut, uint256 tokenOut);
+    event LaunchAutoGraduationFailed(address indexed token, address indexed curve, uint256 gasRemaining);
     event LaunchForceSwept(address indexed token);
     event PoolGraduated(address indexed token, uint256 positionId, uint256 tokenAmount, uint256 pairTokenAmount);
     event LaunchConfigAdded(uint256 indexed id);
@@ -782,8 +784,16 @@ contract OursLaunchFactory is Ownable2Step, ReentrancyGuard, IOursLaunchFactory 
             })
         );
         OursBondingCurve(curve).initialize(token);
-        if(params.revenuePolicy.creatorRecipient!=creatorFeeRecipient)revert InvalidTokenParams();
         revenueRegistry.registerProject(token,curve,originalDeployer,params.revenuePolicy);
+        address[] memory modules = revenueRegistry.strategiesOf(token);
+        address[] memory excluded = new address[](modules.length + 13);
+        excluded[0]=curve; excluded[1]=address(poolManager); excluded[2]=address(memeHook);
+        excluded[3]=address(this); excluded[4]=address(launchDeployer); excluded[5]=address(graduationExecutor);
+        excluded[6]=address(locker); excluded[7]=address(positionManager); excluded[8]=revenueRegistry.feePool();
+        excluded[9]=launchForwarder; excluded[10]=revenueRegistry.platformRecipient();
+        excluded[11]=address(revenueRegistry); excluded[12]=revenueRegistry.settlementRouter();
+        for(uint256 i; i<modules.length; ++i) excluded[13+i]=modules[i];
+        OursLauncherToken(token).configureObservers(revenueRegistry.tokenObserverFactoriesOf(token),excluded);
 
         // The creator's own addresses never count as snipers on their own
         // launch: an atomic dev buy lands in the launch second, exactly when
@@ -867,6 +877,20 @@ contract OursLaunchFactory is Ownable2Step, ReentrancyGuard, IOursLaunchFactory 
         }
         _assertGraduationSeedable(token, launch, curve.realQuoteReserve(), curve.tokenReserve());
         _sweepCurve(token, launch, curve);
+    }
+
+    /**
+     * @notice Mirrors a registered curve's failed automatic graduation on the
+     * factory so indexers can subscribe to one address for every launch.
+     * @dev Event-only callback: deliberately not nonReentrant, since a curve
+     * may report while an outer factory operation is still active.
+     */
+    function reportAutoGraduationFailed(address token, uint256 gasRemaining) external {
+        LaunchedToken storage launch = _launchedTokens[token];
+        if (!launch.exists) revert TokenNotFound();
+        if (msg.sender != launch.curve) revert NotLaunchCurve();
+        if (launch.phase != GraduationPhase.NotGraduated) revert WrongGraduationPhase();
+        emit LaunchAutoGraduationFailed(token, msg.sender, gasRemaining);
     }
 
     /**

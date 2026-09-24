@@ -18,7 +18,7 @@ contract OursCurveAdapter is ReentrancyGuard, IOursSwapAdapter {
     receive() external payable {}
     function execute(address project, address assetIn, address assetOut, uint256 amount, uint256 minOut, bytes calldata route)
         external payable nonReentrant returns (T.ExecutionResult memory result) {
-        if (msg.sender != registry.feePool() && msg.sender != registry.buybackPool() && msg.sender != registry.dividendPool()) revert Invalid();
+        if (!registry.canSwap(project, msg.sender)) revert Invalid();
         (bytes32 poolId,) = registry.poolOf(project);
         address quote = registry.quoteAsset(project);
         if (poolId != 0 || !registry.isTrading(project) || route.length != 0 || amount == 0 || minOut == 0

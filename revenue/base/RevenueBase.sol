@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
+import {OursExecutionGuard} from "../OursExecutionGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -7,7 +8,7 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {OursProjectRegistry} from "../OursProjectRegistry.sol";
-import {OursRevenueTypes as T, IOursSwapAdapter} from "../interfaces/IOursRevenue.sol";
+import {OursRevenueTypes as T, IOursSwapAdapter, IOursFeePool} from "../interfaces/IOursRevenue.sol";
 
 abstract contract RevenueBase is ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
@@ -20,9 +21,24 @@ abstract contract RevenueBase is ReentrancyGuard, EIP712 {
         if (address(r).code.length == 0) revert Invalid(); registry = r;
     }
     receive() external payable {}
-    modifier executor(address project) { if (!registry.canExecute(project, msg.sender)) revert Unauthorized(); _; }
+    modifier executor(address project) { if (!registry.canExecute(project, _revenueSender())) revert Unauthorized(); _; }
+    // Only the currently selected settlement router can forward an authenticated original caller.
+    function _revenueSender() internal view returns (address sender) {
+        if (msg.sender == registry.settlementRouter() && msg.data.length >= 20) {
+            assembly ("memory-safe") { sender := shr(96, calldataload(sub(calldatasize(), 20))) }
+        } else sender = msg.sender;
+    }
+    function _requiresExecutionGuard() internal pure virtual returns (bool) { return true; }
     function _policy(address project, uint64 version) internal view returns (T.PolicyVersion memory p) {
         p = registry.policyAt(project, version); if (p.effectiveAt > block.timestamp) revert Invalid();
+    }
+    function _collectBudget(address project, uint64 version) internal returns (address asset, uint256 amount) {
+        _policy(project, version);
+        if (!registry.canExecuteStrategy(project, address(this))) revert Unauthorized();
+        asset = registry.quoteAsset(project); uint256 before_ = _balance(asset);
+        amount = IOursFeePool(registry.feePool()).claimStrategyBudget(project, asset, version);
+        if (amount == 0 || _balance(asset) != before_ + amount) revert TransferMismatch();
+        totalLiability[asset] += amount;
     }
     function _balance(address asset) internal view returns (uint256) { return asset == address(0) ? address(this).balance : IERC20(asset).balanceOf(address(this)); }
     function _receiveExact(address asset, uint256 amount) internal {
@@ -56,10 +72,10 @@ abstract contract RevenueBase is ReentrancyGuard, EIP712 {
         (bool ok, bytes memory result) = signer.staticcall(abi.encodeCall(IERC1271.isValidSignature, (digest, sig)));
         return ok && result.length >= 32 && abi.decode(result, (bytes4)) == IERC1271.isValidSignature.selector;
     }
-    function _swap(T.ExecutionPlan calldata p, bytes calldata route, bytes calldata sig, T.Purpose purpose,
+    function _swap(T.ExecutionPlan calldata p, bytes calldata route, bytes calldata sig, uint8 purpose,
         address expectedIn, address expectedOut, uint256 available) internal returns (T.ExecutionResult memory result) {
         _policy(p.project, p.policyVersion);
-        if (registry.executionPaused(p.project)
+        if (!registry.canSwap(p.project, address(this)) || registry.executionPaused(p.project)
             || ((expectedIn == p.project || expectedOut == p.project) && !registry.isTrading(p.project))
             || p.purpose != purpose
             || p.assetIn != expectedIn || p.assetOut != expectedOut || expectedIn == expectedOut
@@ -73,6 +89,11 @@ abstract contract RevenueBase is ReentrancyGuard, EIP712 {
         if (expectedIn != p.project && p.maxAmountIn > registry.maxBatchInput(expectedIn)) revert BadPlan();
         bytes32 nonceKey = keccak256(abi.encode(p.project, p.nonce, p.signerEpoch));
         if (usedNonces[nonceKey] || !_validSignature(registry.quoteSigner(), planDigest(p), sig)) revert BadPlan();
+        OursExecutionGuard guard = OursExecutionGuard(registry.executionGuard());
+        if (_requiresExecutionGuard()) {
+            if (address(guard) == address(0)) revert BadPlan();
+            guard.validate(p.project, expectedIn, expectedOut, p.maxAmountIn, p.minAmountOut, p.deadline);
+        }
         usedNonces[nonceKey] = true;
         uint256 beforeIn = _balance(expectedIn); uint256 beforeOut = _balance(expectedOut);
         if (expectedIn != address(0)) IERC20(expectedIn).forceApprove(p.adapter, p.maxAmountIn);
@@ -83,6 +104,7 @@ abstract contract RevenueBase is ReentrancyGuard, EIP712 {
         if (afterIn > beforeIn || afterOut < beforeOut) revert TransferMismatch();
         result = T.ExecutionResult(beforeIn - afterIn, afterOut - beforeOut);
         if (result.actualSpent == 0 || result.actualSpent > p.maxAmountIn || result.actualReceived < p.minAmountOut) revert BadPlan();
+        if (_requiresExecutionGuard()) guard.record(p.project, expectedIn, expectedOut, result.actualSpent, result.actualReceived);
         totalLiability[expectedIn] -= result.actualSpent; totalLiability[expectedOut] += result.actualReceived;
     }
 }

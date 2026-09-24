@@ -2,10 +2,11 @@
 pragma solidity ^0.8.26;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IOursTokenObserver, IOursTokenObserverFactory} from "./interfaces/IOursTokenObserver.sol";
 import {ERC20Burnable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 
 /// @notice Fixed creation code; the deploying contract initializes metadata and mints once atomically.
-contract OursLauncherToken is ERC20, ERC20Burnable {
+contract OursLauncherToken is ERC20Burnable {
     struct Socials {
         string twitter;
         string telegram;
@@ -36,6 +37,43 @@ contract OursLauncherToken is ERC20, ERC20Burnable {
         _initializer = msg.sender;
     }
 
+    bool public observersConfigured;
+    bool private notifying;
+    address[] private observers;
+    error InvalidObserver();
+    error ObserverReentry();
+    event ObserverBound(address indexed factory, address indexed observer);
+
+    function tokenObservers() external view returns (address[] memory) { return observers; }
+
+    /// @notice Called once by the launch factory, before inventory leaves the curve.
+    /// Selected, governance-approved strategy factories supply immutable per-token observers.
+    function configureObservers(address[] calldata factories, address[] calldata system) external {
+        if (msg.sender != launchFactory || observersConfigured) revert UnauthorizedInitializer();
+        if (!initialized || balanceOf(curve) != totalSupply() || factories.length > 8) revert InvalidObserver();
+        observersConfigured = true;
+        notifying = true;
+        for (uint256 i; i < factories.length; ++i) {
+            address observer = IOursTokenObserverFactory(factories[i]).createTokenObserver(system);
+            if (observer.code.length == 0 || IOursTokenObserver(observer).token() != address(this)) revert InvalidObserver();
+            for (uint256 j; j < observers.length; ++j) if (observers[j] == observer) revert InvalidObserver();
+            observers.push(observer);
+            emit ObserverBound(factories[i], observer);
+        }
+        notifying = false;
+    }
+
+    function _update(address from, address to, uint256 amount) internal override {
+        if (notifying) revert ObserverReentry();
+        super._update(from, to, amount);
+        if (observers.length == 0 || from == to || amount == 0) return;
+        notifying = true;
+        for (uint256 i; i < observers.length; ++i) {
+            if (IOursTokenObserver(observers[i]).onBalanceChange(from, to, amount)
+                != IOursTokenObserver.onBalanceChange.selector) revert InvalidObserver();
+        }
+        notifying = false;
+    }
     function name() public view override returns (string memory) { return _tokenName; }
     function symbol() public view override returns (string memory) { return _tokenSymbol; }
 

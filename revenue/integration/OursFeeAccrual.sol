@@ -31,7 +31,6 @@ abstract contract OursFeeAccrual is ReentrancyGuard {
     }
     /// @dev Callable after graduation too; no iteration over versions or projects.
     function sweepRevenue(address project,address asset,uint64 version) external nonReentrant {
-        if (!revenueRegistry.canExecute(project,msg.sender)) revert RevenueUnauthorized();
         uint256 amount=accruedRevenue[project][asset][version]; if(amount==0)revert RevenueInvalid();
         accruedRevenue[project][asset][version]=0;reservedRevenue[asset]-=amount;
         _beforeRevenueSweep(asset,amount);
